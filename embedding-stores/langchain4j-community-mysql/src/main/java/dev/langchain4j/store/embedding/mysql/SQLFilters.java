@@ -14,8 +14,18 @@ import java.util.Map;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 
+/**
+ * Utility class for creating SQL filters from high-level filter abstractions.
+ * This class provides methods to transform logical and comparison-based
+ * filters into SQL-compatible representations, as well as applying parameterized
+ * values to a prepared statement.
+ */
 public class SQLFilters {
 
+    /**
+     * An SQLFilter that applies no filtering. The {@link SQLFilter#toSQL()} method of this filter returns an empty
+     * string.
+     */
     public static final SQLFilter EMPTY = new SQLFilter() {
         @Override
         public String toSQL() { return ""; }
@@ -25,42 +35,39 @@ public class SQLFilters {
         public int setParameters(PreparedStatement preparedStatement, int parameterIndex) { return 0; }
     };
 
+    /**
+     * Creates a SQLFilter representation of the given Filter.
+     *
+     * @param filter The input filter to be converted to a SQLFilter. Can be null.
+     * @param keyMapper A function that maps the filter key and its associated class type to a SQL string. Not null.
+     * @return A SQLFilter instance representing the input filter. Returns SQLFilters.EMPTY if the filter is null.
+     * @throws UnsupportedOperationException If the given filter type is not supported.
+     */
     public static SQLFilter create(Filter filter, BiFunction<String, Class<?>, String> keyMapper) {
         if (filter == null) {
             return EMPTY;
         }
-        if (filter instanceof IsEqualTo) {
-            IsEqualTo isEqualTo = (IsEqualTo) filter;
+        if (filter instanceof IsEqualTo isEqualTo) {
             return createComparisonFilter(isEqualTo.key(), isEqualTo.comparisonValue(), "=", keyMapper);
-        } else if (filter instanceof IsNotEqualTo) {
-            IsNotEqualTo isNotEqualTo = (IsNotEqualTo) filter;
-            return createComparisonFilter(isNotEqualTo.key(), isNotEqualTo.comparisonValue(), "<>", keyMapper);
-        } else if (filter instanceof IsGreaterThan) {
-            IsGreaterThan isGreaterThan = (IsGreaterThan) filter;
+        } else if (filter instanceof IsNotEqualTo isNotEqualTo) {
+            return createIsNotEqualToFilter(isNotEqualTo.key(), isNotEqualTo.comparisonValue(), "<>", keyMapper);
+        } else if (filter instanceof IsGreaterThan isGreaterThan) {
             return createComparisonFilter(isGreaterThan.key(), isGreaterThan.comparisonValue(), ">", keyMapper);
-        } else if (filter instanceof IsGreaterThanOrEqualTo) {
-            IsGreaterThanOrEqualTo isGreaterThanOrEqualTo = (IsGreaterThanOrEqualTo) filter;
+        } else if (filter instanceof IsGreaterThanOrEqualTo isGreaterThanOrEqualTo) {
             return createComparisonFilter(isGreaterThanOrEqualTo.key(), isGreaterThanOrEqualTo.comparisonValue(), ">=", keyMapper);
-        } else if (filter instanceof IsLessThan) {
-            IsLessThan isLessThan = (IsLessThan) filter;
+        } else if (filter instanceof final IsLessThan isLessThan) {
             return createComparisonFilter(isLessThan.key(), isLessThan.comparisonValue(), "<", keyMapper);
-        } else if (filter instanceof IsLessThanOrEqualTo) {
-            IsLessThanOrEqualTo isLessThanOrEqualTo = (IsLessThanOrEqualTo) filter;
+        } else if (filter instanceof final IsLessThanOrEqualTo isLessThanOrEqualTo) {
             return createComparisonFilter(isLessThanOrEqualTo.key(), isLessThanOrEqualTo.comparisonValue(), "<=", keyMapper);
-        } else if (filter instanceof IsIn) {
-            IsIn isIn = (IsIn) filter;
+        } else if (filter instanceof final IsIn isIn) {
             return createInFilter(isIn.key(), isIn.comparisonValues(), keyMapper);
-        } else if (filter instanceof IsNotIn) {
-            IsNotIn isNotIn = (IsNotIn) filter;
+        } else if (filter instanceof final IsNotIn isNotIn) {
             return createNotInFilter(isNotIn.key(), isNotIn.comparisonValues(), keyMapper);
-        } else if (filter instanceof And) {
-            And and = (And) filter;
+        } else if (filter instanceof final And and) {
             return createLogicalFilter(and.left(), and.right(), "AND", keyMapper);
-        } else if (filter instanceof Or) {
-            Or or = (Or) filter;
+        } else if (filter instanceof final Or or) {
             return createLogicalFilter(or.left(), or.right(), "OR", keyMapper);
-        } else if (filter instanceof Not) {
-            Not not = (Not) filter;
+        } else if (filter instanceof final Not not) {
             SQLFilter expression = create(not.expression(), keyMapper);
             return createNotFilter(expression);
         } else {
@@ -73,7 +80,26 @@ public class SQLFilters {
             @Override
             public String toSQL() {
                 Class<?> valueClass = value != null ? value.getClass() : String.class;
-                return keyMapper.apply(key, valueClass) + " " + operator + " ?";
+                final String columnExpression = keyMapper.apply(key, valueClass);
+                return columnExpression + " IS NOT NULL AND " + columnExpression + ' ' + operator + " ? ";
+            }
+
+            @Override
+            public int setParameters(PreparedStatement preparedStatement, int parameterIndex) throws SQLException {
+                preparedStatement.setObject(parameterIndex, value);
+                return 1;
+            }
+        };
+    }
+
+    private static SQLFilter createIsNotEqualToFilter(String key, Object value, String operator, BiFunction<String, Class<?>, String> keyMapper) {
+        return new SQLFilter() {
+            @Override
+            public String toSQL() {
+                Class<?> valueClass = value != null ? value.getClass() : String.class;
+                final String columnExpression = keyMapper.apply(key, valueClass);
+                // IsNotEqualTo should be true if the key is null or the value is not the given values
+                return '(' + columnExpression + " IS NULL OR " + columnExpression + " <> ?)";
             }
 
             @Override
@@ -93,7 +119,8 @@ public class SQLFilters {
                 }
                 Class<?> valueClass = values.iterator().next().getClass();
                 String placeholders = values.stream().map(v -> "?").collect(Collectors.joining(","));
-                return keyMapper.apply(key, valueClass) + " IN (" + placeholders + ")";
+                final String columnExpression = keyMapper.apply(key, valueClass);
+                return columnExpression + " IS NOT NULL AND " + columnExpression + " IN (" + placeholders + ')';
             }
 
             @Override
@@ -115,8 +142,10 @@ public class SQLFilters {
                     return "1=1"; // Always true
                 }
                 Class<?> valueClass = values.iterator().next().getClass();
+                String columnExpression = keyMapper.apply(key, valueClass);
                 String placeholders = values.stream().map(v -> "?").collect(Collectors.joining(","));
-                return keyMapper.apply(key, valueClass) + " NOT IN (" + placeholders + ")";
+                // IsNotIn should be true if the key is null or the value is not in the given values
+                return '(' + columnExpression + " IS NULL OR " + columnExpression + " NOT IN (" + placeholders + "))";
             }
 
             @Override
@@ -153,6 +182,7 @@ public class SQLFilters {
         return new SQLFilter() {
             @Override
             public String toSQL() { return "NOT (" + expression.toSQL() + ")"; }
+
             @Override
             public int setParameters(PreparedStatement preparedStatement, int parameterIndex) throws SQLException {
                 return expression.setParameters(preparedStatement, parameterIndex);

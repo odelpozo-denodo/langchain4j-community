@@ -49,14 +49,14 @@ public class JSONIndexBuilder extends IndexBuilder<JSONIndexBuilder> {
     String getCreateIndexStatement(EmbeddingTable embeddingTable) {
         return "CREATE " + (unique ? "UNIQUE " : "") +
                 "INDEX " + getIndexName(embeddingTable) +
-                " ON " + embeddingTable.name() + " (" + getIndexExpression(embeddingTable) + ")";
+                " ON " + embeddingTable.getQualifiedTableName() + " (" + getIndexExpression(embeddingTable) + ")";
     }
 
     @Override
     String getIndexName(EmbeddingTable embeddingTable) {
         if (indexName == null) {
             indexName = buildIndexName(
-                    embeddingTable.name(),
+                    embeddingTable.tableName(),
                     "_METADATA_" + indexExpressions.stream()
                             .map(mk -> mk.key.toUpperCase().replaceAll("[^A-Z0-9_]+", "_"))
                             .collect(Collectors.joining("_"))
